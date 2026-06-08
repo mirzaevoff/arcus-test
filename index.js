@@ -30,10 +30,21 @@ const LIB_PATH =
     ? 'Arccom.dll'
     : path.join(process.cwd(), 'libarccom.so'));
 
-// Коды команд (зависят от ops.ini вашего терминала; значения из доки/примеров).
-// В Delphi-примере: StartArcus(1)=ОПЛАТА, StartArcus(99)=МЕНЮ АДМИНИСТРАТОРА.
-const CMD_PURCHASE = Number(process.env.ARCUS_CMD_PURCHASE || 1);
-const CMD_ADMIN = Number(process.env.ARCUS_CMD_ADMIN || 99);
+const num = (name, def) => Number(process.env[name] || def);
+
+// Реестр операций. cmd зависит от ops.ini вашего терминала — задаётся через ENV.
+// Известны из доки/примеров: Purchase=1, Admin=99 (StartArcus(1)/StartArcus(99)).
+// Для остальных cmd по умолчанию 0 (не задан) — укажите ARCUS_CMD_* в run.bat,
+// сверившись с ops.ini. Операция с cmd<=0 показывается, но запуск заблокирован.
+// fields — какие входные параметры слать через ITPosSet.
+const OPS = [
+  { key: 'purchase', label: 'Purchase',         env: 'ARCUS_CMD_PURCHASE',   cmd: num('ARCUS_CMD_PURCHASE', 1),   fields: ['amount', 'currency'],        color: '#1a7f37' },
+  { key: 'refund',   label: 'Возврат',          env: 'ARCUS_CMD_REFUND',     cmd: num('ARCUS_CMD_REFUND', 0),     fields: ['amount', 'currency', 'rrn'], color: '#b25e00' },
+  { key: 'cancel',   label: 'Отмена последней', env: 'ARCUS_CMD_CANCEL',     cmd: num('ARCUS_CMD_CANCEL', 0),     fields: [],                            color: '#7a4eab' },
+  { key: 'settle',   label: 'Сверка итогов',    env: 'ARCUS_CMD_SETTLEMENT', cmd: num('ARCUS_CMD_SETTLEMENT', 0), fields: [],                            color: '#0b6e75' },
+  { key: 'admin',    label: 'Admin Menu',       env: 'ARCUS_CMD_ADMIN',      cmd: num('ARCUS_CMD_ADMIN', 99),     fields: [],                            color: '#555' },
+];
+const OP_BY_KEY = Object.fromEntries(OPS.map((o) => [o.key, o]));
 
 // ---------------------------------------------------------------------------
 // Загрузка библиотеки и объявление функций (прототипы из доки, __cdecl)
@@ -95,13 +106,33 @@ const OUT_KEYS = [
   'time',
 ];
 
+// Текстовые поля ARCUS приходят в CP1251. Декодируем в Unicode без зависимостей.
+// Нерегулярная часть 0x80..0xBF — таблицей; 0xC0..0xFF — это А..я (0x0410..0x044F).
+const CP1251_80_BF = [
+  0x0402,0x0403,0x201A,0x0453,0x201E,0x2026,0x2020,0x2021,0x20AC,0x2030,0x0409,0x2039,0x040A,0x040C,0x040B,0x040F,
+  0x0452,0x2018,0x2019,0x201C,0x201D,0x2022,0x2013,0x2014,0xFFFD,0x2122,0x0459,0x203A,0x045A,0x045C,0x045B,0x045F,
+  0x00A0,0x040E,0x045E,0x0408,0x00A4,0x0490,0x00A6,0x00A7,0x0401,0x00A9,0x0404,0x00AB,0x00AC,0x00AD,0x00AE,0x0407,
+  0x00B0,0x00B1,0x0406,0x0456,0x0491,0x00B5,0x00B6,0x00B7,0x0451,0x2116,0x0454,0x00BB,0x0458,0x0405,0x0455,0x0457,
+].map((c) => String.fromCharCode(c)).join('');
+
+function decodeCp1251(buf, len) {
+  let s = '';
+  for (let i = 0; i < len; i++) {
+    const b = buf[i];
+    if (b < 0x80) s += String.fromCharCode(b);
+    else if (b < 0xc0) s += CP1251_80_BF[b - 0x80];
+    else s += String.fromCharCode(0x0410 + (b - 0xc0)); // 0xC0..0xFF -> А..я
+  }
+  return s;
+}
+
 function readField(itpos, key) {
   const buf = Buffer.alloc(256);
   const rc = ITPosGet(itpos, key, buf, buf.length);
   if (rc !== 0) return null; // ключ не заполнен / ошибка
-  const s = buf.toString('latin1');
-  const z = s.indexOf('\0');
-  const val = (z >= 0 ? s.slice(0, z) : s).trim();
+  let len = buf.indexOf(0); // длина до нуль-терминатора
+  if (len < 0) len = buf.length;
+  const val = decodeCp1251(buf, len).trim();
   return val.length ? val : null;
 }
 
@@ -184,6 +215,29 @@ function startOperation({ cmd, label, params = [] }) {
   return { ok: true };
 }
 
+// Запуск операции по ключу из реестра OPS. body — входные значения полей.
+function runOp(opKey, body = {}) {
+  const op = OP_BY_KEY[opKey];
+  if (!op) return { ok: false, error: `Неизвестная операция: ${opKey}` };
+  if (!(op.cmd > 0)) {
+    return {
+      ok: false,
+      error: `Команда для "${op.label}" не задана. Укажите ${op.env} в run.bat (см. ops.ini).`,
+    };
+  }
+
+  const params = [];
+  for (const f of op.fields) {
+    let v = String(body[f] ?? '');
+    if (f === 'amount' || f === 'currency') v = v.replace(/\D/g, '');
+    if (f === 'amount' && !v) return { ok: false, error: 'Укажите сумму' };
+    if (f === 'currency' && !v) v = '860';
+    if (v) params.push({ key: f, value: v });
+  }
+
+  return startOperation({ cmd: op.cmd, label: op.label, params });
+}
+
 function stopCurrent() {
   // Есть активная операция, запущенная тулом — отменяем её объект.
   if (state.itpos) {
@@ -258,25 +312,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/purchase') {
-    const body = await readBody(req);
-    const amount = String(body.amount ?? '').replace(/\D/g, '') || '0';
-    const currency = String(body.currency ?? '').replace(/\D/g, '') || '860';
-    const r = startOperation({
-      cmd: CMD_PURCHASE,
-      label: 'Purchase',
-      params: [
-        { key: 'amount', value: amount },
-        { key: 'currency', value: currency },
-      ],
-    });
-    sendJson(res, r.ok ? 200 : 409, r);
+  // Список операций для UI (без приватных полей)
+  if (req.method === 'GET' && req.url === '/ops') {
+    sendJson(
+      res,
+      200,
+      OPS.map((o) => ({
+        key: o.key,
+        label: o.label,
+        fields: o.fields,
+        color: o.color,
+        ready: o.cmd > 0, // false -> кнопка показана, но запуск заблокирован
+        cmd: o.cmd,
+      }))
+    );
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/admin') {
-    // Меню администратора: без суммы/валюты, cmd=99 (зависит от ops.ini)
-    const r = startOperation({ cmd: CMD_ADMIN, label: 'Admin Menu' });
+  // Запуск любой операции: POST /op/<key>
+  if (req.method === 'POST' && req.url.startsWith('/op/')) {
+    const key = decodeURIComponent(req.url.slice('/op/'.length));
+    const body = await readBody(req);
+    const r = runOp(key, body);
     sendJson(res, r.ok ? 200 : 409, r);
     return;
   }
@@ -291,10 +348,23 @@ const server = http.createServer(async (req, res) => {
   res.end('Not found');
 });
 
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`\n[!] Порт ${PORT} занят. Закройте другой экземпляр тула или задайте PORT.\n`);
+  } else {
+    console.error('[!] Ошибка сервера:', e.message);
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
   console.log(`\nARCUS test tool: http://localhost:${PORT}`);
   console.log(`Библиотека: ${LIB_PATH}`);
-  console.log(`Команда Purchase (cmd): ${CMD_PURCHASE}\n`);
+  console.log('Операции (cmd):');
+  for (const o of OPS) {
+    console.log(`  ${o.label.padEnd(18)} cmd=${o.cmd}${o.cmd > 0 ? '' : `  (не задан — ${o.env})`}`);
+  }
+  console.log('');
 });
 
 // ---------------------------------------------------------------------------
@@ -313,10 +383,8 @@ const HTML = `<!doctype html>
   .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin: 16px 0; }
   label { display: block; font-size: 12px; color: #666; margin-bottom: 4px; }
   input { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 15px; width: 140px; }
-  button { padding: 10px 18px; border: 0; border-radius: 6px; font-size: 15px; cursor: pointer; color: #fff; }
-  #pay { background: #1a7f37; }
-  #admin { background: #555; }
-  #stop { background: #c8102e; font-weight: 700; padding: 10px 24px; margin-left: auto; }
+  button { padding: 10px 18px; border: 0; border-radius: 6px; font-size: 15px; cursor: pointer; color: #fff; background: #333; }
+  #stop { background: #c8102e; font-weight: 700; padding: 10px 24px; }
   button:disabled { opacity: .35; cursor: not-allowed; }
   #status { margin-top: 16px; font-size: 14px; }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; }
@@ -327,25 +395,26 @@ const HTML = `<!doctype html>
 </style>
 </head>
 <body>
-  <h1>ARCUS test tool — Purchase / Стоп</h1>
+  <h1>ARCUS test tool</h1>
 
   <div class="row">
     <div>
-      <label>Сумма (минимальные единицы, без разделителей)</label>
+      <label>Сумма (минимальные единицы)</label>
       <input id="amount" value="2000" inputmode="numeric">
     </div>
     <div>
       <label>Валюта (ISO)</label>
       <input id="currency" value="860" style="width:90px">
     </div>
+    <div>
+      <label>RRN (для возврата/отмены)</label>
+      <input id="rrn" placeholder="необязательно">
+    </div>
   </div>
-  <p class="hint">Напр. amount=2000 &amp; currency=860 → 20.00 UZS. RUB = 643, USD = 840.</p>
+  <p class="hint">amount=2000 &amp; currency=860 → 20.00 UZS. RUB = 643, USD = 840. Кнопка с ⚠ — не задан cmd в run.bat.</p>
 
-  <div class="row">
-    <button id="pay">Purchase</button>
-    <button id="admin">Admin Menu</button>
-    <button id="stop">■ СТОП — отмена любой операции</button>
-  </div>
+  <div class="row" id="ops"></div>
+  <div class="row"><button id="stop">■ СТОП — отмена любой операции</button></div>
 
   <div id="status">Статус: <span class="badge idle">ожидание</span></div>
   <pre id="result">—</pre>
@@ -362,17 +431,35 @@ async function post(url, body) {
   return r.json();
 }
 
-$('pay').onclick = async () => {
-  const amount = $('amount').value;
-  const currency = $('currency').value;
-  const r = await post('/purchase', { amount, currency });
-  if (!r.ok) alert('Ошибка: ' + (r.error || 'не удалось запустить'));
-};
+let OPS = [];
 
-$('admin').onclick = async () => {
-  const r = await post('/admin', {});
-  if (!r.ok) alert('Ошибка: ' + (r.error || 'не удалось открыть меню'));
-};
+// собрать тело запроса из полей, которые нужны операции
+function payload(op) {
+  const b = {};
+  if (op.fields.includes('amount')) b.amount = $('amount').value;
+  if (op.fields.includes('currency')) b.currency = $('currency').value;
+  if (op.fields.includes('rrn')) b.rrn = $('rrn').value;
+  return b;
+}
+
+// построить кнопки из реестра операций
+async function loadOps() {
+  OPS = await (await fetch('/ops')).json();
+  const box = $('ops');
+  box.innerHTML = '';
+  for (const op of OPS) {
+    const btn = document.createElement('button');
+    btn.textContent = op.label + (op.ready ? '' : ' ⚠');
+    btn.dataset.key = op.key;
+    if (op.color) btn.style.background = op.color;
+    if (!op.ready) btn.title = 'Команда не задана (cmd=0). Укажите ' + op.key + ' в run.bat (ops.ini).';
+    btn.onclick = async () => {
+      const r = await post('/op/' + encodeURIComponent(op.key), payload(op));
+      if (!r.ok) alert('Ошибка: ' + (r.error || 'не удалось запустить'));
+    };
+    box.appendChild(btn);
+  }
+}
 
 $('stop').onclick = async () => {
   const r = await post('/stop', {});
@@ -383,25 +470,22 @@ async function poll() {
   try {
     const s = await (await fetch('/status')).json();
     const badge = $('status').querySelector('.badge');
-    if (s.running) {
-      badge.className = 'badge run';
-      badge.textContent = 'операция выполняется…';
-      $('pay').disabled = true;
-      $('admin').disabled = true;
-    } else {
-      badge.className = 'badge idle';
-      badge.textContent = 'ожидание';
-      $('pay').disabled = false;
-      $('admin').disabled = false;
-    }
-    // СТОП всегда активна — её можно нажать в любой момент.
-    $('result').textContent = s.lastResult
-      ? JSON.stringify(s.lastResult, null, 2)
-      : '—';
-  } catch (_) {}
+    const running = s.running;
+    badge.className = running ? 'badge run' : 'badge idle';
+    badge.textContent = running ? 'операция выполняется…' : 'ожидание';
+    // во время операции операционные кнопки блокируем; СТОП всегда активна
+    document.querySelectorAll('#ops button').forEach((b) => {
+      const op = OPS.find((o) => o.key === b.dataset.key);
+      b.disabled = running || !(op && op.ready);
+    });
+    $('result').textContent = s.lastResult ? JSON.stringify(s.lastResult, null, 2) : '—';
+  } catch (_) {
+    const badge = $('status').querySelector('.badge');
+    if (badge) { badge.className = 'badge idle'; badge.textContent = 'нет связи'; }
+  }
 }
-setInterval(poll, 800);
-poll();
+
+loadOps().then(() => { setInterval(poll, 800); poll(); });
 </script>
 </body>
 </html>`;

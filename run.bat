@@ -9,9 +9,13 @@ set "ARCUS_DIR=C:\Arcus2\DLL"
 set "ARCUS_LIB=%ARCUS_DIR%\arccom.dll"
 set "PATH=%ARCUS_DIR%;%PATH%"
 
-REM Operation command codes (depend on ops.ini; 1 = payment, 99 = admin menu)
+REM Operation command codes (depend on ops.ini!). Known: payment=1, admin menu=99.
+REM Fill the others with codes from YOUR ops.ini to enable those buttons.
 set "ARCUS_CMD_PURCHASE=1"
 set "ARCUS_CMD_ADMIN=99"
+REM set "ARCUS_CMD_REFUND=2"
+REM set "ARCUS_CMD_CANCEL=3"
+REM set "ARCUS_CMD_SETTLEMENT=4"
 
 REM Web UI port
 set "PORT=3000"
