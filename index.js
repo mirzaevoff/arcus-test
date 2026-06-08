@@ -85,7 +85,8 @@ const state = {
   running: false,
   itpos: null,
   startedAt: null,
-  lastResult: null, // { runResult, fields, error, stoppedRequested }
+  stopRequestedAt: null, // когда нажали Stop (для замера реакции)
+  lastResult: null,
 };
 
 // Список выходных ключей для чтения результата (Приложение 1 доки)
@@ -172,6 +173,7 @@ function startOperation({ cmd, label, params = [] }) {
   state.running = true;
   state.itpos = itpos;
   state.startedAt = Date.now();
+  state.stopRequestedAt = null;
   state.lastResult = null;
   state.op = label;
 
@@ -194,21 +196,30 @@ function startOperation({ cmd, label, params = [] }) {
       try {
         DeleteITPos(itpos);
       } catch (_) {}
+      // Если Stop был запрошен — сколько мс прошло до завершения Run.
+      // Малое значение = Stop реально прервал операцию.
+      const stoppedAfterMs = state.stopRequestedAt
+        ? Date.now() - state.stopRequestedAt
+        : null;
+
       state.running = false;
       state.itpos = null;
       state.lastResult = {
         op: label,
         runResult: typeof runResult === 'number' ? runResult : null,
+        stoppedAfterMs, // null = Stop не нажимали
         fields,
         error,
         finishedAt: Date.now(),
       };
       console.log(
         `[<] ${label} готово: result=${state.lastResult.runResult}` +
+          (stoppedAfterMs != null ? `, завершилось через ${stoppedAfterMs}мс после Stop` : '') +
           (error ? `, error=${error}` : '') +
           (fields.rrn ? `, RRN=${fields.rrn}` : '') +
           (fields.response_code ? `, RC=${fields.response_code}` : '')
       );
+      state.stopRequestedAt = null;
     }
   });
 
@@ -241,7 +252,8 @@ function runOp(opKey, body = {}) {
 function stopCurrent() {
   // Есть активная операция, запущенная тулом — отменяем её объект.
   if (state.itpos) {
-    console.log('[x] Stop: отмена текущей операции');
+    console.log(`[x] Stop: отмена текущей операции (${state.op})`);
+    state.stopRequestedAt = Date.now();
     try {
       Stop(state.itpos);
       return { ok: true, mode: 'current' };
@@ -307,6 +319,7 @@ const server = http.createServer(async (req, res) => {
     sendJson(res, 200, {
       running: state.running,
       startedAt: state.startedAt,
+      stopAgoMs: state.stopRequestedAt ? Date.now() - state.stopRequestedAt : null,
       lastResult: state.lastResult,
     });
     return;
@@ -472,7 +485,11 @@ async function poll() {
     const badge = $('status').querySelector('.badge');
     const running = s.running;
     badge.className = running ? 'badge run' : 'badge idle';
-    badge.textContent = running ? 'операция выполняется…' : 'ожидание';
+    if (running && s.stopAgoMs != null) {
+      badge.textContent = 'Stop отправлен ' + Math.round(s.stopAgoMs / 1000) + 'с назад — НЕ прервалось…';
+    } else {
+      badge.textContent = running ? 'операция выполняется…' : 'ожидание';
+    }
     // во время операции операционные кнопки блокируем; СТОП всегда активна
     document.querySelectorAll('#ops button').forEach((b) => {
       const op = OPS.find((o) => o.key === b.dataset.key);
