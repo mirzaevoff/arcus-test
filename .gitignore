@@ -1,0 +1,11 @@
+# deps
+node_modules/
+
+# build artifacts (генерируются: см. build-portable.sh)
+dist/
+portable/
+
+# прочее
+.DS_Store
+.claude/
+*.log

@@ -1,0 +1,24 @@
+{
+  "name": "arcus-test-tool",
+  "version": "1.0.0",
+  "description": "Мини тестовый тул для ARCUS2: Purchase + отмена текущей операции (Stop)",
+  "main": "index.js",
+  "bin": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "build:win": "pkg . --targets node22-win-x86 --public --public-packages \"*\" --output dist/arcus-test-tool.exe"
+  },
+  "pkg": {
+    "assets": [
+      "node_modules/koffi/build/koffi/win32_ia32/koffi.node"
+    ],
+    "outputPath": "dist"
+  },
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.3.0"
+  }
+}
